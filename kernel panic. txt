@@ -1,0 +1,704 @@
+Ok, là on a encore un nouveau kernel panic “System is deadlocked on memory” juste après modprobe virtio_blk.
+
+Je t’explique ce qui se passe, puis je te donne un plan de secours “offline” IBM Cloud, parce que là l’approche “réparer depuis le dracut” devient impossible.
+
+
+---
+
+1️⃣ Pourquoi modprobe virtio_blk finit en kernel panic OOM ?
+
+Dans ta trace on voit encore :
+
+out_of_memory
+__alloc_pages_slowpath
+…
+Kernel panic - not syncing: System is deadlocked on memory
+
+Au moment où tu fais :
+
+modprobe virtio_blk
+
+le kernel doit :
+
+charger le module,
+
+allouer de la mémoire pour les structures PCI / block,
+
+déclencher udev, etc.
+
+
+Mais :
+
+tu es dans un initramfs minuscule,
+
+sans swap du tout,
+
+avec très peu de RAM,
+
+et déjà pleins de tentatives précédentes (dracut, lvm, etc.) qui ont rempli la mémoire.
+
+
+Résultat :
+
+plus assez de pages libres pour charger le module + lancer udev,
+
+l’OOM-killer n’a aucun processus “tuable” (que des threads kernel, dracut, udev…),
+
+il se retrouve coincé → deadlock on memory → kernel panic.
+
+
+Donc ce n’est pas que virtio_blk est mauvais, c’est juste que ta VM n’a plus de marge mémoire pour continuer le dépannage depuis l’initramfs.
+
+En clair :
+👉 on est en train de bricoler dans un environnement trop petit et trop cassé.
+
+
+---
+
+2️⃣ Continuer dans dracut n’est plus réaliste
+
+On a :
+
+pas de disque visible dans /dev,
+
+pas de /sysroot,
+
+pas de lsblk, fdisk, free, etc.,
+
+chaque modprobe risque de refaire un kernel panic OOM.
+
+
+👉 À ce stade, le dépannage “de l’intérieur” devient instable.
+
+Sur un environnement de prod bancaire, le bon move maintenant c’est de passer en mode “offline recovery”.
+
+
+---
+
+3️⃣ Plan propre IBM Cloud : réparation OFFLINE via une VM de secours
+
+C’est la méthode la plus safe, tu la connais sûrement déjà pour d’autres clouds (AWS / Azure) :
+
+🟦 Étape 0 – Éteindre proprement la VM cassée
+
+Dans IBM Cloud :
+
+1. Va sur ta VSI.
+
+
+2. Power off (shut down / stop instance).
+
+
+
+
+---
+
+🟦 Étape 1 – Détacher le boot volume de la VM cassée
+
+Toujours dans la page de la VSI cassée :
+
+1. Onglet Storage volumes.
+
+
+2. Repère le boot volume (type boot, souvent boot-xxxx).
+
+
+3. Choisis Detach (ou “Remove from instance” sans delete !).
+
+
+
+Le volume reste dans ton compte, mais plus attaché à la VM.
+
+
+---
+
+🟦 Étape 2 – Créer une VM de secours (helper)
+
+1. Crée une nouvelle VSI IBM Cloud dans la même zone (même region/zone que le volume).
+
+
+2. Prends un profil avec assez de RAM (8 Go par ex.).
+
+
+3. OS : RHEL 8 ou 9 (même famille que la VM cassée).
+
+
+
+
+---
+
+🟦 Étape 3 – Attacher l’ancien boot volume à la VM de secours
+
+Sur la nouvelle VSI :
+
+1. Onglet Storage volumes.
+
+
+2. Attach existing volume → choisis le boot volume de l’ancienne VM.
+
+
+3. Attache-le comme data disk, par ex. /dev/vdb.
+
+
+
+
+---
+
+🟦 Étape 4 – Dépannage depuis la VM de secours
+
+Connecte-toi en SSH à la VM de secours, puis :
+
+lsblk
+
+Tu dois voir quelque chose comme :
+
+vda    40G  (root de la VM de secours)
+/dev/vdb   100G  (boot/root de ta VM cassée)
+
+Si c’est du LVM à l’intérieur :
+
+pvscan
+vgscan
+lvscan
+
+Puis :
+
+mkdir /mnt/rescue
+mount /dev/mapper/rootvg-root /mnt/rescue
+# /boot peut être séparé
+mount /dev/mapper/rootvg-boot /mnt/rescue/boot  # si besoin
+
+Ensuite chroot propre :
+
+mount -t proc /proc /mnt/rescue/proc
+mount -t sysfs /sys /mnt/rescue/sys
+mount -o bind /dev /mnt/rescue/dev
+mount -o bind /run /mnt/rescue/run
+chroot /mnt/rescue
+
+Dans le chroot tu peux enfin travailler normalement, avec de la RAM, du swap, etc. :
+
+🔧 a) Corriger le swap et fstab
+
+nano /etc/fstab
+# commenter ou corriger les lignes /dev/rootvg/swap cassées
+
+🔧 b) Supprimer resume= dans grub
+
+nano /etc/default/grub
+# retirer resume=/dev/mapper/rootvg-swap
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+🔧 c) Régénérer tous les initramfs (pour être sûr d’avoir virtio, LVM, etc.)
+
+dracut -fv --regenerate-all
+
+Ça va reconstruire les initramfs avec tous les drivers nécessaires (virtio, LVM…).
+
+
+---
+
+🟦 Étape 5 – Sortir, démonter, et remettre le volume sur la VM originale
+
+Dans le chroot :
+
+exit
+umount /mnt/rescue/proc
+umount /mnt/rescue/sys
+umount /mnt/rescue/dev
+umount /mnt/rescue/run
+umount /mnt/rescue
+
+Sur IBM Cloud :
+
+1. Détache le volume de la VM de secours.
+
+
+2. Ré-attache ce volume comme boot volume sur la VM originale (celle qui était cassée).
+
+
+3. Redémarre la VM originale.
+
+
+
+Avec :
+
+initramfs régénéré,
+
+fstab propre,
+
+pas de resume= vers un swap inexistant,
+→ tu dois booter normalement, et virtio_blk/LVM seront chargés tout seuls.
+
+
+
+---
+
+4️⃣ Variante “rapide” si tu peux augmenter la RAM
+
+Si tu ne veux pas faire tout ce cirque et que ton instance IBM Cloud est faiblement dimensionnée (1–2 Go RAM) :
+
+1. Éteins la VM.
+
+
+2. Change le profil pour un avec 8 Go RAM.
+
+
+3. Redémarre → tu auras plus de marge pour faire :
+
+modprobe virtio_blk
+
+modprobe virtio_scsi
+
+pvscan etc.
+
+
+
+4. Puis monte root → chroot → dracut -fv --regenerate-all comme décrit plus haut (mais cette fois depuis la même VM).
+
+
+
+Mais honnêtement, vu le nombre de kernel panic OOM, la méthode “VM de secours + chroot” est plus propre.
+
+
+---
+
+🔚 En résumé
+
+modprobe virtio_blk → kernel panic = OOM sévère, pas assez de RAM/swap.
+
+/dev sans disque = drivers storage non chargés dans initramfs.
+
+On est arrivée à une limite : réparer depuis dracut est trop instable.
+
+Solution propre IBM Cloud :
+
+détacher boot volume,
+
+l’attacher à une VM de secours,
+
+chroot dessus,
+
+réparer fstab / swap / grub,
+
+régénérer initramfs,
+
+remettre le volume sur la VM originale.
+
+
+
+Si tu veux, je peux te rédiger un runbook N3 “IBM Cloud – Recovery d’une VSI RHEL OOM / initramfs cassé” en format prêt à coller dans un wiki interne (avec prérequis, étapes, commandes, et section “post-mortem / RCA”).
+
+D’accord Hamza — on va résoudre TON problème, SANS changer le profil de la VM, SANS augmenter la RAM, SANS accéder aux droits IBM Cloud admin.
+➡️ On répare uniquement depuis l’environnement dracut en forçant l’accès au disque sans consommer de RAM, puis on monte le système et on régénère initramfs.
+
+Tu peux le faire avec les droits que tu as déjà, uniquement via la console VNC IBM Cloud.
+
+
+---
+
+🟥 POURQUOI TU TE BLOQUES AUJOURD’HUI ?
+
+Parce que :
+
+le système n’a plus de swap
+
+tu es dans un initramfs minimal, sans utilitaires complets
+
+chaque modprobe → OOM panic
+
+donc le kernel ne charge jamais les drivers VirtIO ou SCSI
+
+
+💡 La seule solution : charger les modules SANS udev, SANS dépendances, SANS scripts, donc SANS consommer de RAM.
+→ On va forcer le chargement en mode raw.
+
+
+---
+
+🟥 🟩 ÉTAPE 1 : DÉSACTIVER UDEV dans dracut
+
+Udev se déclenche automatiquement quand tu fais modprobe, et c’est lui qui consomme énormément de RAM → kernel panic.
+
+Donc on le bloque PROVISOIREMENT :
+
+udevadm control --exit
+
+Si la commande ne fonctionne pas, fais :
+
+killall systemd-udevd
+
+Puis vérifie :
+
+ps | grep udev
+
+Doit retourner rien.
+
+➡️ Maintenant les modprobe ne vont plus déclencher udev → beaucoup moins de RAM utilisée.
+
+
+---
+
+🟥 🟩 ÉTAPE 2 : CHARGER LES DRIVERS SANS udev (mode “no-run”)
+
+Essaye maintenant :
+
+modprobe -S virtio_pci
+modprobe -S virtio_blk
+modprobe -S virtio_scsi
+modprobe -S scsi_mod
+modprobe -S sd_mod
+
+L’option -S = “skip install scripts” →
+⚡ ça évite d’exécuter les scripts d’installation et donc toute allocation mémoire lourde → fini les kernel panic.
+
+
+---
+
+🟥 🟩 ÉTAPE 3 : SCAN DES BUS SANS udev
+
+Maintenant qu’udev ne va pas exploser la RAM, fais :
+
+echo "- - -" > /sys/class/scsi_host/host0/scan
+echo "- - -" > /sys/class/scsi_host/host1/scan
+echo "- - -" > /sys/class/scsi_host/host2/scan
+
+Puis vérifie :
+
+ls /dev | grep -E "vd|sd|nvme"
+
+Silence… vérifie calmement…
+Si tu vois :
+
+vda
+vda1
+vda2
+
+Ou :
+
+sda
+sda1
+
+→ Le disque est enfin là.
+
+
+---
+
+🟥 🟩 ÉTAPE 4 : SCAN PCI pour IBM Cloud (important)
+
+IBM utilise du VirtIO PCI, souvent non chargé en initramfs.
+
+Force le rescan PCI :
+
+echo 1 > /sys/bus/pci/rescan
+
+Puis :
+
+ls /dev | grep -E "vd|sd|nvme"
+
+
+---
+
+🟥 🟩 ÉTAPE 5 : SI LE DISQUE APPARAÎT → ON MONTE ROOTFS
+
+Quand /dev/vda apparaît :
+
+lvm pvscan
+vgscan
+lvscan
+
+Puis :
+
+mkdir /sysroot
+mount /dev/mapper/rootvg-root /sysroot
+mount /dev/mapper/rootvg-usr  /sysroot/usr   # si séparé
+mount /dev/mapper/rootvg-var  /sysroot/var   # si séparé
+
+
+---
+
+🟥 🟩 ÉTAPE 6 : CHROOT (maintenant possible)
+
+Montage des environnements :
+
+mount -t proc /proc /sysroot/proc
+mount -t sysfs /sys /sysroot/sys
+mount -o bind /dev /sysroot/dev
+mount -o bind /run /sysroot/run
+chroot /sysroot
+
+Tu es dans le système réel.
+
+
+---
+
+🟥 🟩 ÉTAPE 7 : RÉPARATION DÉFINITIVE
+
+(À faire dans le chroot)
+
+1. Corriger fstab (supprimer l’ancien swap cassé)
+
+nano /etc/fstab
+
+2. Supprimer resume=… dans /etc/default/grub
+
+nano /etc/default/grub
+
+3. Régénérer grub
+
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+4. Régénérer tous les initramfs avec les drivers virtio
+
+dracut -fv --regenerate-all
+
+
+---
+
+🟥 🟩 ÉTAPE 8 : Quitter et reboot
+
+exit
+reboot -f
+
+
+---
+
+🟦 AVANTAGES DE CETTE MÉTHODE
+
+✔ Pas besoin d’augmenter la RAM
+✔ Pas besoin de changer le profil IBM Cloud
+✔ Pas besoin de droits admin
+✔ Pas besoin de détacher/attacher de volume
+✔ Pas besoin de créer une VM de secours
+
+On répare tout depuis dracut, malgré un initramfs incomplet et un OOM kernel.
+
+
+---
+
+🟩 Hamza : maintenant, dis-moi ce que donne :
+
+👉 udevadm control --exit
+👉 puis modprobe -S virtio_blk
+
+S’il n’y a pas de kernel panic → on est sauvé.
+
+
+
+Voici une Root Cause claire, professionnelle et valable pour un incident IBM Cloud VSI — en anglais et en français.
+
+
+---
+
+🟦 ROOT CAUSE (English)
+
+The incident was caused by an incomplete or corrupted initramfs image combined with very low memory available during early boot.
+Due to an Out-Of-Memory (OOM) condition inside the initramfs environment, the kernel was unable to load the required storage drivers (virtio_blk / virtio_scsi / scsi_mod / sd_mod).
+
+As a result:
+
+The IBM Cloud boot volume was correctly attached at the infrastructure level
+
+But the Linux kernel could not load the disk controller drivers
+
+No block devices appeared under /dev
+
+LVM could not detect any physical volumes
+
+/sysroot could not be mounted
+
+dracut dropped into emergency mode
+
+Any attempt to load modules triggered another OOM and ended with:
+“Kernel panic – not syncing: System is deadlocked on memory”
+
+
+Therefore, the OS could not access its root filesystem even though the disk was attached, creating a boot failure loop.
+
+Root Cause:
+A corrupted / incomplete initramfs combined with a memory-starved dracut environment prevented the kernel from loading storage drivers, making the attached boot volume invisible during early boot.
+
+
+---
+
+🟥 ROOT CAUSE (Français)
+
+L’incident a été provoqué par un initramfs incomplet ou corrompu associé à un manque critique de mémoire durant la phase de démarrage.
+À cause d’un état Out-Of-Memory (OOM) dans l’environnement initramfs, le noyau n’a pas pu charger les modules de stockage nécessaires (virtio_blk / virtio_scsi / scsi_mod / sd_mod).
+
+Conséquences :
+
+Le disque boot IBM Cloud était bien attaché côté infrastructure
+
+Mais le noyau Linux ne chargeait pas les drivers du contrôleur disque
+
+Aucun périphérique bloc n’apparaissait dans /dev
+
+LVM ne détectait aucun Physical Volume
+
+/sysroot ne pouvait pas être monté
+
+dracut passait automatiquement en emergency shell
+
+Toute tentative de charger un module provoquait un nouvel OOM et un panic :
+« Kernel panic – not syncing: System is deadlocked on memory »
+
+
+Ainsi, l’OS était incapable d’accéder à son système de fichiers racine malgré la présence du disque, provoquant une boucle de panne de démarrage.
+
+Cause Racine :
+Un initramfs corrompu/incomplet, combiné à un manque critique de mémoire au boot, a empêché le chargement des drivers de stockage, rendant le disque boot invisible au noyau.
+
+
+---
+
+🟩 Si tu veux, je peux aussi te préparer :
+
+un RCA complet avec “contributing factors + corrective actions + preventive actions”
+
+un message formaté Teams/JIRA/ServiceNow
+
+une version courte pour DSI ou manager
+
+une version détaillée N3 / expert Linux
+
+
+Dis-moi ce que tu préfères.
+
+
+
+Voici la Root Cause EXACTE centrée sur l’origine LVM swap, l’intervention, et comment elle a déclenché l’incident — en anglais et en français.
+
+Je formule cela comme un vrai RCA N3/N4 pour production bancaire.
+
+
+---
+
+🟦 ROOT CAUSE – ORIGIN (English)
+
+Origin of the incident:
+A manual intervention on the LVM swap logical volume (rename, removal, or recreation) introduced an inconsistency between:
+
+the actual LVM configuration (swap LV removed or recreated),
+
+the system’s /etc/fstab,
+
+the kernel boot parameter resume=,
+
+and the initramfs contents.
+
+
+This resulted in:
+
+1. The system trying at boot to access a swap LV that no longer existed.
+
+
+2. The resume=/dev/mapper/rootvg-swap parameter forcing dracut to wait for a non-existent device.
+
+
+3. Excessive retries inside dracut, consuming memory.
+
+
+4. The lack of swap during early boot, combined with journald and udev allocations, triggering an Out-of-Memory condition in initramfs.
+
+
+5. Because initramfs was built before the LVM change, it did not contain the correct LVM and storage drivers to detect the root volume under OOM pressure.
+
+
+6. This caused the kernel to fail loading the storage modules (virtio_blk / scsi_mod), leaving no block devices visible under /dev.
+
+
+7. Dracut dropped into emergency mode, and repeated OOM → “Kernel panic: System is deadlocked on memory.”
+
+
+
+Root cause summary:
+A swap LVM modification created a mismatch between LVM, fstab, and the resume= parameter. This prevented swap from coming online, caused an initramfs OOM situation, and blocked the kernel from loading storage drivers, making the boot disk invisible.
+
+
+---
+
+🟥 CAUSE ORIGINALE – LVM Swap (Français)
+
+Origine de l’incident :
+Une intervention sur le volume logique LVM du swap (suppression, renommage ou recréation) a introduit une incohérence entre :
+
+la configuration LVM réelle (swap supprimé ou recréé),
+
+/etc/fstab,
+
+le paramètre de boot resume=,
+
+et l’initramfs (jamais régénéré après le changement).
+
+
+Cela a provoqué :
+
+1. Le système cherchait au démarrage un LV swap qui n’existait plus.
+
+
+2. Le paramètre resume=/dev/mapper/rootvg-swap forçait dracut à attendre un device inexistant.
+
+
+3. Cette attente + les timeouts provoquaient une consommation excessive de mémoire dans l’initramfs.
+
+
+4. Sans swap disponible, le démarrage se faisait en manque critique de mémoire (OOM).
+
+
+5. Sous OOM, le noyau n’a pas réussi à charger les drivers de stockage nécessaires (virtio_blk / scsi_mod).
+
+
+6. Résultat : aucun disque n’apparaissait dans /dev, donc rootvg introuvable.
+
+
+7. Dracut passait en emergency shell puis kernel panic :
+« System is deadlocked on memory »
+
+
+
+Résumé de la cause racine :
+La modification du LV swap a cassé la cohérence entre LVM, fstab, le paramètre resume= et l’initramfs. Cela a empêché l’activation du swap, déclenché un OOM en initramfs, et bloqué le chargement des drivers de stockage, rendant le disque root invisible au démarrage.
+
+
+---
+
+🟩 CAUSE D’INTERVENTION (Français / English)
+
+🇬🇧 Cause of the human intervention
+
+The operator modified the swap LVM (delete/rename/recreate) without:
+
+updating /etc/fstab,
+
+removing or updating resume= in GRUB,
+
+regenerating the initramfs afterwards (dracut -f).
+
+
+This inconsistency is what triggered the failure.
+
+🇫🇷 Cause de l’intervention
+
+L’opérateur a modifié le LVM du swap (suppression/renommage/recréation) sans :
+
+mettre à jour /etc/fstab,
+
+supprimer/modifier resume= dans GRUB,
+
+régénérer l’initramfs (dracut -f).
+
+
+Cette incohérence a déclenché l’incident.
+
+
+---
+
+🟦 Si tu veux, je peux maintenant te préparer :
+
+✔ Un RCA complet “5 whys”
+✔ Un RCA long pour manager / DSI
+✔ Une version très courte pour Teams ou ticket
+✔ Un plan d’actions préventives (standardisation LVM, remove resume, dracut regen, checks N3)
+
+Dis-moi ce dont tu as besoin.
