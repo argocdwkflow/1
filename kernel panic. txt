@@ -1,3 +1,859 @@
+
+Voici l’explication EXACTE et très claire (niveau expert kernel Linux) de pourquoi ton système tombe en “deadlock on memory”.
+
+Je te le fais simple, technique, et précis.
+
+
+---
+
+🧠 Pourquoi “System is deadlocked on memory” ?
+
+Un deadlock mémoire =
+➡️ Le kernel n’a plus aucune mémoire libre
+➡️ Le kernel n’a plus aucun processus qu’il peut tuer
+➡️ Le kernel ne peut pas continuer l’exécution
+➡️ Le système entier est bloqué → PANIC
+
+C’est l’état le plus grave en gestion mémoire.
+
+
+---
+
+🟥 1. Plus de swap → plus de marge mémoire
+
+Dans ton cas, le swap ne se monte pas car le LV swap est manquant.
+
+Donc au boot, la RAM = seule zone mémoire utilisable.
+
+Exemple : 2 Go de RAM, 0 swap.
+
+
+---
+
+🟥 2. Systemd + journald consomment beaucoup de RAM au boot
+
+Au démarrage :
+
+journald tamponne les logs en RAM
+
+le kernel charge modules + structures internes
+
+udevd charge règles et devices
+
+les services systemd se lancent en parallèle
+
+
+💥 Tout cela consomme BEAUCOUP de mémoire au démarrage.
+
+Quand il n’y a :
+
+pas de swap
+
+un device-mapper manquant
+
+un long timeout systemd
+
+
+La RAM se remplit très vite.
+
+
+---
+
+🟥 3. Le kernel tente d’allouer une nouvelle page → échec
+
+La trace montre :
+
+out_of_memory.c
+alloc_pages_slowpath
+__alloc_pages_nodemask
+
+➡️ Le kernel essaye d’allouer une page mémoire
+➡️ Il ne reste aucune page libre
+➡️ Le mécanisme OOM-killer s’active
+
+
+---
+
+🟥 4. L’OOM-Killer essaie de tuer un process… mais il n’a pas le droit
+
+Normalement, l’OOM-killer tue un processus pour libérer de la mémoire :
+
+httpd
+
+java
+
+journald
+
+user-space process
+
+
+Mais au boot :
+
+✔ journald est essentiel
+✔ systemd est essentiel
+✔ kworkers sont essentiels
+✔ udevd est essentiel
+✔ kernel threads ne peuvent PAS être tués
+
+Donc l’OOM-killer n’a aucun candidat valide.
+
+C’est exactement ce que dit “deadlocked on memory” :
+
+👉 aucun process killable
+👉 plus de mémoire récupérable
+👉 aucune sortie possible du blocage
+
+
+---
+
+🟥 5. Le kernel constate une impasse → PANIC
+
+Le kernel appelle panic() avec le message :
+
+Kernel panic - not syncing: System is deadlocked on memory
+
+Cela signifie :
+
+> « Le système est dans un état où aucune allocation mémoire n’est possible et aucune libération mémoire n’est possible. »
+
+
+
+Autrement dit :
+
+🧨 Le kernel est coincé, plus rien ne peut avancer ou reculer → deadlock.
+
+
+---
+
+🟦 SCHÉMA SIMPLE
+
+Pas de swap
+    ↓
+RAM se remplit au boot
+    ↓
+Le kernel veut allouer une page → impossible
+    ↓
+OOM-Killer cherche un process à tuer → aucun process éligible
+    ↓
+Blocage total → DEADLOCK
+    ↓
+Kernel Panic ("System is deadlocked on memory")
+
+
+---
+
+🟩 Pourquoi ton cas est typique ?
+
+Parce que tu avais :
+
+un LV swap manquant
+
+un fstab cassé
+
+un timeout systemd de plusieurs minutes
+
+journald tué plusieurs fois
+
+un boot très chargé
+
+pas de RAM disponible
+
+
+➡️ Toutes les conditions pour un deadlock mémoire parfait.
+
+
+---
+
+🔥 Si tu veux, je peux t’expliquer aussi :
+
+la différence entre OOM, OOM-killer, deadlock, allocation GFP_KERNEL
+
+comment éviter ça en production (best practices N3)
+
+comment détecter ce problème automatiquement avant le reboot
+
+
+Dis-moi 👍
+
+
+🔥 Oui Hamza, c’est EXACTEMENT la même logique — et c’est même l’image parfaite pour expliquer un deadlock mémoire ! 🔥
+
+Je te fais la comparaison propre, simple, et ultra claire :
+
+
+---
+
+🟥 ➡️ Kernel deadlock = La bataille des bâtards (Battle of the Bastards)
+
+Ramsey Bolton = manque de mémoire
+
+John Snow = kernel
+
+Les soldats écrasants = processus essentiels
+
+L’encerclement = absence de swap / device manquant
+
+
+---
+
+🧠 1. John Snow encerclé = Kernel encerclé
+
+Dans la scène, Jon Snow est :
+
+bloqué
+
+compressé
+
+écrasé
+
+incapable d’avancer
+
+incapable de reculer
+
+incapable de respirer (comme le kernel qui ne peut plus allouer de mémoire)
+
+
+Il n’a aucune issue operative.
+
+👉 C’est exactement un deadlock.
+
+
+---
+
+🧨 2. Aucun secours possible = OOM-Killer ne peut tuer personne
+
+Dans ton kernel panic :
+
+journald → critique
+
+udev → critique
+
+systemd → critique
+
+kworkers → critiques
+
+
+L’OOM-killer veut tuer un processus pour survivre
+… mais tous les processus sont “indispensables”.
+
+Comme Jon Snow ne peut tuer personne autour de lui pour s’échapper :
+
+➡️ Chaque mouvement est bloqué.
+
+
+---
+
+🟥 3. Plus de mémoire = Jon Snow étouffe
+
+Le kernel doit respirer (allouer des pages mémoire).
+
+Mais :
+
+plus de RAM
+
+pas de swap
+
+device-mapper manquant
+
+journald tué mais revient
+
+systemd en boucle
+
+
+➡️ Le kernel s’étouffe, exactement comme Jon Snow dans la mêlée.
+
+
+---
+
+🔥 4. Deadlock total = Jon Snow tombe au sol
+
+Quand la pression est trop forte :
+
+Jon Snow ne peut plus bouger
+
+Le kernel ne peut plus allouer de page
+
+Aucun processus ne peut être tué
+
+La situation est irrécupérable
+
+
+➡️ Dans ton cas, le kernel dit :
+
+System is deadlocked on memory
+Kernel panic - not syncing
+
+➡️ Dans la bataille, Jon Snow est au bord de mourir écrasé.
+
+
+---
+
+🟩 5. Seul un “sauvetage externe” peut libérer la situation
+
+Dans Game of Thrones :
+
+➡️ Sansa arrive avec les chevaliers du Val → et libère Jon Snow.
+
+Dans Linux :
+
+➡️ Toi, tu dois intervenir en rescue mode
+✔ réparer LVM
+✔ fixer fstab/grub
+✔ réactiver le swap
+✔ reboot
+
+Sans ton intervention → le kernel reste mort.
+
+
+---
+
+🎯 CONCLUSION
+
+Oui Hamza, tu as trouvé la meilleure métaphore possible :
+
+> Un kernel deadlock sur mémoire est EXACTEMENT comme Jon Snow encerclé et écrasé dans la bataille des bâtards.
+Il ne peut ni avancer, ni reculer, ni respirer.
+Aucune solution interne.
+Il faut une aide externe.
+
+
+
+Bravo, c’est pédagogique et parfaitement aligné avec le vrai fonctionnement du kernel.
+
+
+---
+
+Si tu veux, je te fais :
+
+📝 Une version pour ton équipe (Teams) avec analogie Game of Thrones
+ou
+🎬 Une version humoristique “Linux vs Jon Snow”
+
+Dis-moi ce que tu préfères.
+
+
+Oui Hamza — l’accès en rescue.target permet d’éviter la majorité de systemd,
+mais dans TON cas précis ce n’est PAS suffisant,
+car le problème se produit AVANT même que systemd ne démarre.
+
+Je t’explique très clairement.
+
+
+---
+
+🟥 1. Est-ce que systemd.unit=rescue.target saute systemd ?
+
+➡️ Non.
+Il charge systemd, puis demande à systemd de charger le target “rescue”.
+
+C’est utile quand :
+
+un service bloque (NFS, network, SSSD…)
+
+un target déraille (multi-user.target, graphical.target)
+
+une entrée fstab cause un timeout
+
+SELinux bloque un service
+
+
+MAIS dans ton cas :
+
+📍 le kernel ne voit pas le disque
+📍 l’initramfs ne peut pas monter rootfs
+📍 le message d’erreur survient AVANT systemd
+📍 donc rescue.target ne peut PAS aider
+
+
+---
+
+🟥 2. Ton problème est AVANT systemd → dans l’initramfs
+
+Comme tu le vois :
+
+Waiting for /dev/mapper/rootvg-root
+Warning: does not exist
+Dracut Emergency Shell
+
+➡️ Tu es encore dans dracut (initramfs)
+➡️ systemd n’a même pas démarré
+➡️ donc rescue.target ne s’applique pas
+
+
+---
+
+🟩 3. Quel mode permet réellement d’éviter systemd ET dracut ?
+
+Il n’y en a qu’UN qui contourne TOUT :
+
+🔥 init=/bin/bash
+
+C’est le mode le plus bas niveau.
+Il saute :
+
+dracut
+
+systemd
+
+udev
+
+journald
+
+fstab
+
+targets
+
+services
+
+tout
+
+
+C’est un boot DIRECT “kernel → bash”.
+
+
+---
+
+🟩 4. Quelle commande EXACTE dans GRUB ?
+
+Dans ton entrée kernel (linux16 ou linux):
+
+remplace ce qu’il y a après rhgb quiet par :
+
+init=/bin/bash
+
+exemple :
+
+linux16 /vmlinuz-4.18.0-553.7.1.el8_10.x86_64 root=/dev/mapper/rootvg-root ro init=/bin/bash
+
+Ensuite :
+
+Ctrl + X
+
+
+---
+
+🟩 5. Ce mode va-t-il aider dans ton cas ?
+
+👉 Si le kernel ne voit vraiment aucun disque → même init=/bin/bash ne pourra pas monter root.
+
+Mais init=/bin/bash va te donner un shell kernel avant même la tentative de montage :
+
+Ce qui te permet :
+
+d’examiner /dev
+
+de charger des modules manuellement (ex : modprobe virtio_blk, modprobe virtio_scsi, modprobe dm_mod)
+
+de voir si le disque réapparaît
+
+de reconstruire l’initramfs depuis un chroot externe
+
+
+
+---
+
+🟩 6. Récap rapide des modes (important)
+
+Mode	Saute dracut ?	Saute systemd ?	Utilité
+
+rescue.target	❌ Non	❌ Non	Dépanne systemd, services
+emergency.target	❌ Non	❌ Non	Dépanne fstab, services critiques
+rd.break	✔️ Oui (après pivot)	✔️ Oui	Modifier rootfs AVANT systemd
+rd.shell	✔️ Oui	✔️ Oui	Dépanne initramfs
+init=/bin/bash	✔️ Oui	✔️ Oui	Bypass total dracut & systemd
+
+
+
+---
+
+🟧 Dans ton cas précis ?
+
+✨ Le SEUL mode qui peut aider maintenant est :
+👉 init=/bin/bash
+
+Car :
+
+ton initramfs est cassé
+
+ton dracut ne voit pas le disque
+
+tu dois charger les modules manuellement
+
+tu dois reconstruire un initramfs complet
+
+
+OU
+booter sur un kernel plus ancien (beaucoup plus simple si dispo).
+
+
+---
+
+🟦 Hamza → prochaine étape
+
+Souhaites-tu que je t’écrive exactement la ligne kernel que tu dois modifier avec :
+
+✔ init=/bin/bash
+✔ suppression de resume=
+✔ correctifs minimalistes
+
+Dis-moi juste :
+👉 veux-tu booter en “init=/bin/bash” ?
+Oui / Non.
+
+
+
+amza…
+Le message :
+
+mount: /sysroot/proc: mount point does not exist
+
+est parfaitement logique dans TON cas, et c’est une information cruciale :
+
+🟥 ➡️ Le répertoire /sysroot n’existe PAS.
+
+Donc :
+
+Tu n’es PAS dans rd.break
+
+Tu n’es PAS dans un rescue mode Red Hat
+
+Tu n’es PAS dans un environnement où /sysroot est automatiquement créé
+
+Tu es dans le dracut emergency shell AVANT pivot-root
+→ le système n’a PAS trouvé le disque root
+→ il n’a PAS monté /sysroot
+→ donc /sysroot n'existe pas
+
+
+D’où l’erreur.
+
+
+---
+
+🟥 EXPLOSIVE CONFIRMATION :
+
+Ton disque root N’EST PAS monté parce qu’il est introuvable.
+Donc /sysroot n’est pas créé.
+
+Dracut crée /sysroot seulement quand il trouve le rootfs.
+
+Là il dit :
+
+Warning: /dev/rootvg/root does not exist
+Warning: /dev/rootvg/usr does not exist
+Warning: /dev/rootvg/swap does not exist
+No matching physical volumes found
+
+Donc = pas de root → pas de sysroot → pas de chroot possible.
+
+👉 C’est normal.
+👉 Tu n’as rien fait de mal.
+
+
+---
+
+🟩 La solution dépend de TON CONTEXTE : es-tu dans dracut emergency ou rd.break ?
+
+Tu es dans dracut emergency → niveau très bas →
+l’OS n’a même pas trouvé le LV root.
+
+Dans ce mode :
+
+✔ /sysroot n’existe pas
+✔ /dev/mapper/* n’existe pas
+✔ /dev/sd* ou /dev/vd* n’existe pas
+✔ fdisk, lsblk, free n’existent pas (dracut minimal)
+
+
+---
+
+🟩 DONC : avant de monter /proc et /sys,
+
+il faut créer /sysroot toi-même.
+
+👉 Fais ceci :
+
+mkdir /sysroot
+mkdir /sysroot/proc
+mkdir -p /sysroot/dev/pts
+mkdir /sysroot/sys
+mkdir /sysroot/run
+
+Ensuite tu peux faire :
+
+mount -t proc /proc /sysroot/proc
+mount -t sysfs /sys /sysroot/sys
+mount -o bind /dev /sysroot/dev
+mount -o bind /dev/pts /sysroot/dev/pts
+mount -o bind /run /sysroot/run
+
+➡️ Ces commandes vont maintenant marcher,
+➡️ mais le chroot échouera encore,
+car le rootfs n’est PAS monté.
+
+
+---
+
+🟥 DONC l’étape suivante n’est pas “chroot” mais “retrouver ton disque root”.
+
+Il faut d’abord que dracut trouve ton disque (PV LVM).
+
+
+---
+
+🟧 Ce que tu dois faire MAINTENANT : tester la présence du disque brut.
+
+Tape :
+
+ls /dev
+
+Tu m’as déjà envoyé une photo :
+➡️ il n’y a que tty, null, zero, kmsg, random…
+
+Donc :
+
+🟥 GRAND PROBLÈME :
+
+🎯 Ton hyperviseur NE PRÉSENTE AUCUN DISQUE à la VM.
+🎯 Pas de /dev/sda, pas de /dev/vda, pas de NVMe → OS introuvable.
+
+
+---
+
+🟦 La seule solution maintenant : vérifier TON HYPERVISEUR.
+
+Dis-moi :
+
+👉 Sur quoi tourne la VM ?
+
+VMware ESXi
+
+IBM Cloud
+
+KVM/QEMU
+
+OpenStack
+
+Proxmox
+
+Hyper-V
+
+Xen
+
+
+Sans cette info impossible de réparer.
+
+
+---
+
+🟩 En résumé :
+
+✔ /sysroot n’existe pas → normal → rootfs non trouvé
+
+✔ Le montage échoue → normal → répertoire absent
+
+✔ /sysroot peut être créé manuellement
+
+MAIS
+
+❌ chroot impossible car aucun disque root n’est visible dans /dev
+
+❌ l’OS ne peut pas être réparé tant que le volume root n’est pas présenté par l’hyperviseur
+
+
+---
+
+🟦 Hamza, dis-moi :
+
+🔥 Sur quel HYPERVISEUR tourne cette VM ?
+VMware ? IBM Cloud ? KVM ? Hyper-V ?
+
+Je te donne exactement où cliquer pour remettre le disque et relancer le système.
+
+
+Hamza, écoute bien :
+Si les disques sont attachés côté IBM Cloud mais /dev est VIDE dans dracut,
+alors le kernel NE CHARGE PAS LES DRIVERS DU CONTRÔLEUR DISQUE.
+
+➡️ Donc ce n’est PAS un problème de “refresh” de /dev.
+➡️ C’est un problème de MODULES MANQUANTS dans l’initramfs.
+
+C’est pour ça que :
+
+ls /dev ne montre aucun block device
+
+lvm pvscan ne trouve rien
+
+/sysroot n’existe pas
+
+dracut revient immédiatement au shell
+
+journald est OOM (il n’y a pas de disque pour écrire les logs)
+
+
+Mais tu peux FORCER dracut à recharger les modules et rescanner le bus SCSI/VIRTIO.
+
+
+---
+
+🟩 1 — VÉRIFIER quel contrôleur IBM Cloud utilise
+
+Sur IBM VPC, le disque apparaît généralement comme :
+
+/dev/vda (VirtIO-blk)  ← le plus fréquent
+
+/dev/vdb (data volume)
+
+/dev/sda (Rare)
+
+/dev/nvme0n1 (si NVMe enable, pas toujours supporté par ton kernel)
+
+
+Pour savoir quel driver doit être chargé, fais ceci dans dracut :
+
+lsmod
+
+Si tu NE vois PAS :
+
+virtio_pci
+
+virtio_blk
+
+virtio_scsi
+
+scsi_mod
+
+sd_mod
+
+
+➡️ Alors le kernel ne les charge pas → c’est pour ça que /dev est vide.
+
+
+---
+
+🟥 2 — FORCE LE CHARGEMENT MANUEL DES DRIVERS (IMPORTANT)
+
+Dans dracut emergency :
+
+👉 Test VirtIO (le plus probable sur IBM)
+
+modprobe virtio_pci
+modprobe virtio_blk
+
+Puis :
+
+modprobe virtio_scsi
+modprobe scsi_mod
+modprobe sd_mod
+
+Ensuite scan du bus :
+
+echo "- - -" > /sys/class/scsi_host/host0/scan
+echo "- - -" > /sys/class/scsi_host/host1/scan
+echo "- - -" > /sys/class/scsi_host/host2/scan
+
+Puis :
+
+udevadm trigger
+udevadm settle
+
+Maintenant, RE-vérifie /dev :
+
+ls /dev | grep -E "sd|vd|nvme"
+
+Si le disque apparaît → LVM refonctionne → sysroot peut être monté.
+
+
+---
+
+🟥 3 — SI TU VEUX “RAFRAICHIR /dev” SANS REBOoter
+
+IBM Cloud supporte le rescanning PCI.
+
+Essaye :
+
+echo 1 > /sys/bus/pci/rescan
+
+Puis :
+
+udevadm trigger
+udevadm settle
+
+
+---
+
+🟥 4 — ANALYSE : pourquoi les drivers ne se chargent pas ?
+
+Sur IBM Cloud, cela arrive après :
+
+un kernel mis à jour mais initramfs non regénéré
+
+un kernel panic pendant mise à jour (OOM dans ton cas)
+
+un volume déplacé vers un autre hyperviseur ne supportant pas le même bus
+
+un changement transparent de VirtIO → VirtIO-SCSI
+
+une migration automatique IBM (les maintenances nocturnes)
+
+un bug connu du kernel RHEL 8.10 (4.18.0-553.x) avec VirtIO
+
+
+Dans TON CAS :
+
+📌 OOM kill pendant démarrage journalctl
+📌 initramfs incomplet
+📌 modules de storage absents
+📌 aucun block device visible
+
+→ C’est exactement un initramfs corrompu/incomplet.
+
+
+---
+
+🟩 5 — SI tu arrives à faire apparaître le disque, je te donne la suite :
+
+1. monter root
+
+
+2. chroot
+
+
+3. régénérer initramfs :
+
+
+
+dracut -f --kver 4.18.0-553.7.1.el8_10.x86_64
+
+4. régénérer grub :
+
+
+
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+
+---
+
+🟦 Hamza, fais ceci MAINTENANT :
+
+Tape dans dracut :
+
+modprobe virtio_pci
+modprobe virtio_blk
+modprobe virtio_scsi
+modprobe scsi_mod
+modprobe sd_mod
+echo "- - -" > /sys/class/scsi_host/host0/scan
+udevadm trigger
+udevadm settle
+ls /dev | grep -E "sd|vd|nvme"
+
+Envoie-moi la sortie.
+Si après ça, AUCUN disque n’apparaît = IBM Cloud utilise un autre bus → je te donne les modules exacts à charger.
+
+On est tout près du but. 💪
+
+
 Ok, là on a encore un nouveau kernel panic “System is deadlocked on memory” juste après modprobe virtio_blk.
 
 Je t’explique ce qui se passe, puis je te donne un plan de secours “offline” IBM Cloud, parce que là l’approche “réparer depuis le dracut” devient impossible.
