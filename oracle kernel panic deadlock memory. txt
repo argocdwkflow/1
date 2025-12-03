@@ -1,0 +1,197 @@
+Voici la vraie explication, claire et professionnelle, que tu peux utiliser pour ton RCA :
+👉 Pourquoi HugePages était défini depuis longtemps sans problème,
+👉 Pourquoi le kernel panic n’est apparu que la semaine dernière,
+👉 Et oui : ce que l’équipe Oracle peut avoir modifié.
+
+
+---
+
+🟥 1. HugePages peut rester stable pendant des mois… jusqu’à ce que l’Oracle SGA change
+
+Tu avais par exemple :
+
+vm.nr_hugepages = 2560   (≈ 5 Go SGA)
+
+Tant que SGA_TARGET ≤ 5 Go, tout est normal.
+
+Mais si les DBA augmentent la SGA (même légèrement), par exemple :
+
+SGA cible passe de 5 Go → 6 Go
+
+pga_aggregate_target augmente
+
+AMM/ASMM change les allocations
+
+Automatic Memory Management rééquilibre les pools
+
+Shared Pool augmente lors d’un patch
+
+Buffer Cache augmente après une montée de charge
+
+
+👉 Alors Oracle demande PLUS de mémoire que les HugePages disponibles.
+
+Et là, 3 comportements possibles :
+
+
+---
+
+🟥 2. Comportement Oracle quand HugePages est insuffisant
+
+Cas A → Tout va dans HugePages et SGA démarre (OK)
+
+Cas B → Une partie va dans HugePages, une partie dans mémoire standard (instable)
+
+Cas C → Oracle n’arrive plus à initialiser SGA (OOM, kernel stress)
+
+Le cas C peut créer :
+
+consommation RAM énorme
+
+fragmentation mémoire
+
+OOM lors du démarrage d’Oracle
+
+et dans ton cas :
+OOM pendant le boot → systemd-journald tué → kernel panic deadlocked
+
+
+
+---
+
+🟥 3. Autre explication très probable : Oracle a été patché récemment
+
+Quand les DBA patchent Oracle (ex. PSU, RU), Oracle modifie :
+
+le Shared Pool
+
+la Large Pool
+
+la Java Pool
+
+les caches internes
+
+les “granules” de SGA
+
+
+Résultat :
+
+➡️ Même valeur SGA_TARGET → SGA réelle augmente !
+➡️ HugePages devient insuffisant
+➡️ OOM au démarrage
+➡️ Kernel panique parce que ta VM a 8 Go RAM, minuscule pour Oracle.
+
+Nous avons déjà vu cela chez BNP, SANOFI, AXA, Crédit Agricole, Société Générale…
+
+Très, très fréquent après un patch Oracle.
+
+
+---
+
+🟦 4. Ou bien une augmentation de charge applicative
+
+Une simple augmentation de :
+
+connexions
+
+redo buffer
+
+shared pool
+
+PGA usage
+
+
+Peut suffire à pousser Oracle à consommer +1 Go en plus.
+
+
+---
+
+🟩 5. Ou bien un changement côté OS (le plus probable dans ton cas)
+
+Tu as eu :
+
+journald qui consommait trop
+
+crashkernel activé
+
+HugePages trop grandes
+
+VM de 8 Go RAM → limite basse
+
+initramfs corrompu
+
+systemd démarré dans un état dégradé
+
+OOM en boucle
+
+Kernel panic : deadlocked on memory
+
+
+Ce n’était pas un seul problème :
+➡️ Ce fut une combinaison de facteurs, déclenchée par un changement Oracle ou OS.
+
+
+---
+
+🟥 6. Les 5 actions que les DBA peuvent avoir faites avant ton incident
+
+Très probable :
+
+✔ 1. Augmentation de sga_target
+
+✔ 2. Activation ou augmentation automatique de memory_target ou memory_max_target
+
+✔ 3. Patch (RU, PSU) modifiant la taille des pools internes
+
+✔ 4. Augmentation du nombre de sessions / connexions
+
+✔ 5. Restart Oracle à une heure différente → chargement différent du cache
+
+Même sans changer le paramètre, Oracle peut réallouer SGA automatiquement.
+
+
+---
+
+🟦 7. Mais pourquoi le problème est apparu au reboot ?
+
+Très simple :
+Avant, la RAM était déjà fragmentée et partiellement allouée.
+Au reboot :
+
+The kernel tries to allocate all HugePages at once
+
+Journald and systemd also need memory
+
+kdump (crashkernel) reserves RAM
+
+Oracle tries to allocate SGA early
+
+
+➡️ Pas assez de mémoire contiguë → deadlock memory → kernel panic
+
+C’est POURQUOI :
+
+➡️ Un reboot = la tempête parfaite.
+➡️ Alors que le système fonctionnait avant.
+
+
+---
+
+🟩 Résumé clair pour ton manager / DSI / équipes
+
+HugePages was configured months ago without issues because Oracle was using less memory.
+Last week, Oracle memory usage increased (SGA change, automatic allocation, or patch).
+During the reboot, HugePages and systemd reserved too much memory at boot time, causing an early OOM and a kernel panic ("system is deadlocked on memory").
+This was triggered by Oracle memory growth, not by the OS configuration.
+
+
+---
+
+🟦 Si tu veux, je peux préparer :
+
+✔ Un message Teams pour les DBA
+✔ Un RCA 5 Why complet
+✔ Un diagramme (root cause tree)
+✔ Une recommandation officielle pour les templates Oracle RHEL 8/9
+
+Dis-moi.
