@@ -1,13 +1,1 @@
-
-
-We have encountered issues when registering Pre-Production servers. A new Illumio policy was applied, and Pre-Prod machines are now considered as Production systems. As a result, network flows are currently allowed only toward the Production Capsule VIP.
-
-In this situation, Pre-Prod servers are forced to use the Kickstart repositories until a new governance decision is made.
-We see two possible options moving forward:
-
-1. Allow Pre-Prod servers to register through the Production Capsule VIP, or
-
-
-2. Have the Illumio team revert to the previous policy and reopen the required flows for the Pre-Prod Capsule VIP.
-
-
+.... 
