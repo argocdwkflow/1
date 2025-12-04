@@ -1,0 +1,238 @@
+Je te fais un texte que tu peux coller tel quel dans un mail / Teams à ton chef et au chef de ton chef.
+
+
+---
+
+Bonjour,
+
+Je vous partage la proposition technique que je souhaite mettre en place pour industrialiser :
+
+les Upgrades In Place (UIP) RHEL 8 → 9,
+
+les montées de version mineure RHEL 9.4 → 9.6,
+
+en s’appuyant sur Red Hat Satellite + Ansible AAP, avec un modèle propre d’Activation Keys, Content Views, Composite Content Views et gestion de la “Release Version” par hôte.
+
+
+
+---
+
+1. Contexte & contraintes
+
+Parc important de serveurs RHEL 8.10 et RHEL 9.4 en production.
+
+Besoin de migrer progressivement vers RHEL 9.6, sans risque pour les applications sensibles.
+
+Architecture sécurisée :
+
+les VMs n’ont pas de flux 443 vers le Satellite,
+
+elles consomment le contenu via les Capsules (VIP Illumio).
+
+
+Nous devons rester alignés avec les préconisations Red Hat :
+
+UIP supportée : RHEL 8.10 → RHEL 9.4 via Leapp,
+
+puis upgrade mineur RHEL 9.4 → 9.6 via dnf distro-sync.
+
+
+
+
+---
+
+2. Modèle Satellite (AK / CV / CCV / repos / Release Version)
+
+Je propose une modélisation simple et stable côté Satellite :
+
+1. Un CCV global RHEL 9 :
+CCV-RHEL9-GLOBAL
+
+intègre des CV techniques (BaseOS, AppStream, outils internes, monitoring, etc.).
+
+les repos RHEL 9 sont globaux (BaseOS / AppStream RHEL 9) et contiennent plusieurs versions mineures (9.4, 9.5, 9.6).
+
+
+
+2. Content Views RHEL9 dédiés :
+
+CV-RHEL9-BaseOS → BaseOS RHEL9 (inclut 9.4, 9.5, 9.6),
+
+CV-RHEL9-AppStream → AppStream RHEL9 (idem),
+
+
+éventuellement d’autres CV (outils internes, monitoring, HA, etc.).
+
+
+
+3. Activation Keys globales RHEL9 :
+
+AK-RHEL9-PROD-GLOBAL
+
+AK-RHEL9-NONPROD-GLOBAL
+Ces AK :
+
+pointent sur CCV-RHEL9-GLOBAL,
+
+ne forcent pas de Release Version (champ laissé vide),
+
+servent uniquement à standardiser l’enregistrement des machines par environnement.
+
+
+
+4. Contrôle fin par Release Version au niveau de l’hôte :
+
+Pour les serveurs figés en 9.4 : Release Version = 9.4
+
+Pour les serveurs autorisés à monter en 9.6 : Release Version = 9.6 (ou vide = latest)
+➜ C’est ce paramètre qui empêche qu’une machine 9.4 installe des paquets 9.6 par erreur.
+
+
+
+5. Host Groups (si nécessaire) :
+
+possibilité de définir des Host Groups “RHEL9-PROD-LOCK-9.4”, “RHEL9-PROD-LATEST” qui portent :
+
+la bonne AK globale,
+
+le bon CCV,
+
+la Release Version par défaut (9.4 ou vide),
+
+
+ce qui facilite la cohérence pour les nouveaux serveurs.
+
+
+
+
+
+---
+
+3. Chaîne d’upgrade proposée (UIP + Ansible + Satellite)
+
+a) Cas RHEL 8.10 → RHEL 9.4 (Upgrade In Place supporté)
+
+Utilisation de Leapp, conformément au support Red Hat :
+
+1. Serveur en 8.10, rattaché à un CV d’upgrade (repos 8.10 + 9.4 + leapp).
+
+
+2. Exécution leapp preupgrade puis leapp upgrade.
+
+
+3. Reboot, puis dnf distro-sync pour aligner complètement sur 9.4.
+
+
+
+
+b) Cas RHEL 9.4 → RHEL 9.6 (upgrade mineur, standard)
+
+Étape 1 – Côté Satellite, mise à jour de la Release Version :
+
+via Ansible AAP + rôle dédié,
+
+le rôle n’utilise que hammer depuis un nœud qui a le flux 443 vers Satellite,
+
+pour chaque serveur, un hammer host update --content-release-version 9.6 est exécuté.
+
+Les VMs n’appellent jamais directement le Satellite, elles continuent à utiliser les Capsules.
+
+
+Étape 2 – Côté machines RHEL, upgrade contrôlé :
+
+second rôle Ansible exécuté sur les serveurs ciblés :
+
+vérification que l’OS est bien RHEL 9,
+
+dnf clean all,
+
+dnf distro-sync -y (vers les paquets 9.6 puisque la Release Version est à 9.6),
+
+contrôle de la version,
+
+reboot si nécessaire.
+
+
+
+Les deux rôles sont séparés :
+
+Rôle 1 : gestion de la configuration Satellite (Release Version) via hammer
+
+Rôle 2 : exécution technique de la montée de version sur les serveurs (dnf / reboot).
+➜ On garde une bonne séparation des responsabilités et une traçabilité claire.
+
+
+
+
+---
+
+4. Bénéfices de la solution
+
+✅ Conforme Red Hat :
+
+8.10 → 9.4 via Leapp (support officiel),
+
+9.4 → 9.6 via distro-sync standard.
+
+
+✅ Respect de la sécurité réseau / Illumio :
+
+aucune ouverture de flux 443 supplémentaire des VMs vers Satellite,
+
+seul AAP / bastion discute avec Satellite (hammer),
+
+les VMs ne parlent qu’aux Capsules.
+
+
+✅ Contrôle fin par application / cluster :
+
+serveurs sensibles (Oracle, clusters, applicatifs critiques) peuvent rester verrouillés en 9.4,
+
+les autres peuvent suivre la dernière version mineure (9.6), en maîtrisant le périmètre par inventaire Ansible.
+
+
+✅ Industrialisation & traçabilité :
+
+Ansible apporte un log centralisé des upgrades (stdout, rapports, éventuellement JSON/CSV),
+
+il est possible de bâtir des vagues de migration (PCI, non-PROD, PROD) contrôlées.
+
+
+✅ Réversibilité / gouvernance :
+
+en cas de problème, on peut refiger la Release Version sur 9.4 pour un périmètre donné,
+
+la logique est documentable dans un runbook et transposable aux équipes N2/N3.
+
+
+
+
+---
+
+5. Prochaines étapes proposées
+
+1. Valider le design Satellite (AK globales, CV/CCV RHEL9, gestion de la Release Version).
+
+
+2. Mettre en place les rôles Ansible :
+
+rôle “Satellite – set Release Version via hammer”,
+
+rôle “RHEL – upgrade 9.4 → 9.6”.
+
+
+
+3. Réaliser un POC sur un petit périmètre (2–3 serveurs non critiques).
+
+
+4. Étendre au PREPROD, puis PROD par vagues, avec reporting (JSON/CSV ou ServiceNow).
+
+
+
+
+---
+
+Si vous le souhaitez, je peux préparer un runbook détaillé (version N2/N3) et un rapport de POC pour formaliser la stratégie de migration RHEL 9.4 → 9.6 dans notre contexte Satellite/Capsules.
+
+Cordialement,
+Hamza
