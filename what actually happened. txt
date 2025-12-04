@@ -109,3 +109,87 @@ If you want, I can also prepare:
 ✔ A slide for your team meeting
 
 Just tell me.
+
+
+Here is a professional, concise, and impactful Teams message in English, suitable for your managers, the DBA team, and the Linux engineering team.
+
+
+---
+
+💬 Teams Message – “Deadlock Memory / HugePages” Incident Summary
+
+Hello everyone,
+
+We have identified the root cause of the recent kernel panic “System is deadlocked on memory” affecting several RHEL 8.10 servers running Oracle workloads.
+
+✅ Root Cause
+
+During the automated RAM/CPU reduction performed via Terraform, several servers were downsized to 8 GB RAM but continued to use HugePages values sized for the previous memory configuration.
+
+HugePages are reserved very early in the boot process (before systemd, before sysctl, and before the root filesystem is mounted).
+
+If the configured HugePages exceed the amount of available RAM, the kernel is unable to allocate the required contiguous memory, which leads to:
+
+insufficient free memory for DRACUT and journald
+
+failure to activate rootvg/root
+
+OOM kills during early boot
+
+and ultimately a kernel panic with “deadlocked on memory” before the OS can start.
+
+
+🎯 Why the issue appeared now
+
+Oracle SGA/PGA memory usage increased recently (workload, patches, auto-tuning).
+
+Terraform RAM reduction reduced available physical memory.
+
+HugePages were not recalculated after these changes.
+
+The old HugePages configuration remained embedded in the initramfs, meaning the kernel kept trying to allocate too much memory at boot.
+
+
+🛠 Corrective Actions Performed
+
+Booted into rescue mode and activated LVM.
+
+Adjusted HugePages based on actual RAM and Oracle SGA requirements.
+
+Rebuilt the initramfs and regenerated GRUB so the kernel uses the updated memory configuration.
+
+Verified journald, crashkernel, overcommit, and min_free_kbytes settings.
+
+Server successfully rebooted.
+
+
+📌 Key Lessons & Recommendations
+
+1. Any RAM/CPU modification done via Terraform must be followed by an automatic recalculation of HugePages for Oracle workloads.
+
+
+2. Any memory-related modification (HugePages, overcommit, THP) requires a dracut -f + grub2-mkconfig to ensure kernel/initramfs consistency.
+
+
+3. Oracle servers with only 8 GB RAM are highly sensitive to early-boot memory reservation.
+
+
+4. Oracle SGA may grow automatically (auto-tuning), which can trigger this issue even without parameter changes on the DBA side.
+
+
+
+I recommend that we define a joint Oracle/Linux engineering policy to prevent recurrence across the environment.
+
+I’m available to assist with next steps and alignment.
+
+
+---
+
+If you want, I can prepare:
+
+✔ a shorter 1-minute version
+✔ a technical version for the Linux N3 team
+✔ an RCA (timeline + 5 Why)
+✔ a message dedicated specifically to the DBA team about SGA/HugePages alignment
+
+Just tell me.
