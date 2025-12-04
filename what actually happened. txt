@@ -1,0 +1,111 @@
+Here is a clear, sharp 3-minute English pitch explaining the deadlock memory / kernel panic incident, suitable for management, N3 teams, and post-mortems.
+
+
+---
+
+✅ 3-Minute Pitch – Deadlock Memory Incident (English)
+
+We faced a kernel panic on multiple RHEL 8.10 servers with the message “System is deadlocked on memory”.
+This issue occurred during the early boot phase, before systemd started, and was triggered by memory exhaustion inside the initramfs.
+
+1. What actually happened
+
+During boot, the Linux kernel must reserve several memory regions before the operating system loads:
+
+HugePages (Oracle SGA)
+
+crashkernel (kdump reservation)
+
+kernel free-memory pool
+
+early systemd/journald buffers
+
+DRACUT modules to detect LVM and the root filesystem
+
+
+In our case, the number of HugePages configured was much larger than the available RAM on the server (8 GB).
+This caused the kernel to run out of free, contiguous memory during initialization.
+
+When the kernel cannot allocate the required memory:
+
+journald is killed by the OOM killer
+
+DRACUT cannot mount the root filesystem
+
+systemd never starts
+
+the kernel enters a deadlock state and panics
+
+
+This is why the system repeatedly failed to boot.
+
+
+---
+
+2. Why the issue appeared suddenly
+
+Although HugePages were configured months ago, Oracle memory usage increased recently (SGA growth, patch, automatic memory management, or higher workload).
+At reboot, the kernel attempted to pre-allocate all HugePages at once and no longer had enough RAM available.
+
+Additionally, the existing initramfs still contained old memory parameters, so even reducing HugePages in sysctl had no effect until:
+
+initramfs was rebuilt
+
+GRUB configuration was regenerated
+
+
+
+---
+
+3. How we fixed it
+
+To restore the boot process, we:
+
+1. Booted into rescue mode
+
+
+2. Activated LVM and mounted the root filesystem
+
+
+3. Reduced the HugePages value to a realistic level
+
+
+4. Rebuilt initramfs so the kernel uses the updated memory settings
+
+
+5. Regenerated GRUB
+
+
+6. Rebooted successfully
+
+
+
+The system now starts normally, with sufficient free memory for DRACUT, systemd, and Oracle.
+
+
+---
+
+4. Key lessons
+
+HugePages must always be sized according to the actual SGA, not guessed values
+
+Changing sysctl is not enough unless initramfs is rebuilt
+
+Small-RAM servers running Oracle are highly sensitive to memory reservation
+
+Kernel deadlock is caused by early-boot memory exhaustion, long before systemd starts
+
+
+This was not an OS bug: it was a memory reservation imbalance between Oracle requirements and available physical RAM.
+
+
+---
+
+If you want, I can also prepare:
+
+✔ A shorter 1-minute executive pitch
+✔ A formal RCA (short/long version)
+✔ A diagram explaining the deadlock mechanism
+✔ A slide for your team meeting
+
+Just tell me.
