@@ -1,0 +1,134 @@
+Parfait, merci pour la précision.
+👉 Serveurs physiques RHEL 9.4 = le troubleshooting SAN est un peu différent (drivers, firmware, HBA utils, multipath rework depuis RHEL9).
+Je te donne un runbook 100% adapté RHEL9.4 + serveurs physiques Dell / HP / IBM.
+
+
+---
+
+🧭 Troubleshooting SAN Paths Lost – Serveurs Physiques RHEL 9.4
+
+Les SAN paths lost sur serveurs physiques RHEL9.4 sont souvent liés à :
+
+Création/Modification de zoning SAN
+
+Upgrade firmware HBA non suivi d’un déréférencement zoning
+
+Mise à jour erronée multipath-tools (changement de defaults RHEL9)
+
+Fabric outage (switch A ou switch B)
+
+dev_loss_tmo trop faible dans RHEL9
+
+Problème driver qla2xxx / lpfc / bfa
+
+
+
+---
+
+1️⃣ Vérifier multipath RHEL9 (format différent de RHEL7/8)
+
+Commande RHEL9 requise :
+
+multipath -ll --vendor --path
+
+Points à vérifier :
+
+paths en failed faulty running
+
+paths en queue_if_no_path (normal)
+
+groupage par prio (ALUA)
+
+
+🔎 RHEL9 impose un comportement ALUA strict, donc un seul groupe active peut exister.
+
+
+---
+
+2️⃣ Vérifier dmesg pour erreurs HBA (RHEL9 = messages plus verbeux)
+
+dmesg -T | egrep -i "scsi|fc|error|reset|blocked|loss|multipath"
+
+Messages typiques RHEL9 sur discours SAN lost :
+
+blk_update_request: I/O error, dev sdX
+
+scsi: device offline
+
+lpfc hba port link down
+
+qla2xxx [ISP]: LOOP DOWN
+
+blocked for more than 120 seconds
+
+
+
+---
+
+3️⃣ Vérifier état HBA – RHEL9 commande officielle
+
+Pour toutes marques HBA :
+
+ls -l /sys/class/fc_host/host*/port_state
+ls -l /sys/class/fc_host/host*/speed
+cat /sys/class/fc_host/host*/port_name
+
+Pour Emulex (Dell/HP fréquents) :
+
+systool -c fc_host -v | grep -E "port_state|speed|node_name"
+
+Pour Qlogic :
+
+cat /sys/kernel/debug/qla2xxx/*/link_state
+
+Vérifie :
+
+Online sur les deux ports (host6 et host7 par exemple)
+
+Speed cohérente (16Gb/32Gb)
+
+Pas de toggling Online→LinkDown→Online
+
+
+
+---
+
+4️⃣ Vérifier zoning et visibilité des targets SAN depuis RHEL9
+
+systool -c fc_remote_ports -v | grep -E "port_name|port_state"
+
+Si un fabric (A ou B) entier ne remonte aucun fc_remote_port → zoning SAN KO.
+
+
+---
+
+5️⃣ Vérifier dev_loss_tmo RHEL9 (cause fréquente path lost)
+
+RHEL9 utilise par défaut une valeur basse de timeout en cas de perte lien.
+
+Vérification :
+
+cat /sys/class/fc_remote_ports/rport-*/dev_loss_tmo
+
+Recommandation entreprise :
+
+30 minimum
+
+infinity pour bases Oracle / VCS / clusters sensibles
+
+
+Pour modifier temporairement :
+
+echo 30 > /sys/class/fc_remote_ports/rport-*/dev_loss_tmo
+
+
+---
+
+6️⃣ Vérifier multipath.conf (RHEL9 différent RHEL8)
+
+Exemple recommandé entreprise RHEL9 :
+
+defaults {
+    user_friendly_names yes
+    find_multipaths both
+    no_path_retry
