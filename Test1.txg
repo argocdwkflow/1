@@ -1,1 +1,14 @@
 
+Here is a short, clear, professional English answer you can send to the business teams:
+
+
+---
+
+Using yum instead of dnf does not create application-level stability issues.
+On RHEL8 and RHEL9, yum is only a compatibility wrapper that internally calls dnf. Both use the same backend, the same dependency solver, and the same RPM transactions.
+The behaviour and results are identical.
+
+
+---
+
+If you want, I can also provide a longer technical explanation.
