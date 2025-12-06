@@ -1,0 +1,318 @@
+Voici les méthodes 3 et 4 détaillées au niveau N4/N5, telles qu’utilisées dans des environnements où le fournisseur cloud ne permet pas le boot sur ISO (IBM Cloud VSI, OpenStack restreint, VMware sans virtual media).
+Ces méthodes transforment GRUB + initramfs en un véritable environnement rescue local, sans ISO, sans seconde VM, directement sur le disque.
+
+Ce sont des techniques avancées, rarement documentées, et utilisées par des experts SRE / kernels / rescue-level.
+
+
+---
+
+🟥 MÉTHODE 3 — Boot Rescue via chainloading d’un rootfs minimal local
+
+(Hack GRUB + rootfs interne)
+
+
+---
+
+🎯 Objectif
+
+Créer un root filesystem minimal (basé sur BusyBox ou Alpine) dans un fichier,
+le placer dans /boot,
+et configurer GRUB pour booter directement dessus → équivalent à un Rescue Boot.
+
+Aucune ISO, aucun loop externe.
+Fonctionne même si ton rootfs principal est cassé.
+
+
+---
+
+🔧 ÉTAPE 1 — Création d’un rootfs minimal BusyBox
+
+Créer un dossier qui va recevoir le système de fichiers :
+
+mkdir /root/rescue_rootfs
+cd /root/rescue_rootfs
+
+Installer BusyBox statique (selon OS) :
+
+dnf install busybox -y
+
+Créer l’arborescence minimale :
+
+mkdir -p bin dev proc sys etc
+cp /bin/busybox bin/
+
+Créer un shell par défaut :
+
+ln -s /bin/busybox bin/sh
+
+
+---
+
+🔧 ÉTAPE 2 — Création d’un init script interne
+
+Créer /root/rescue_rootfs/init :
+
+cat << 'EOF' > init
+#!/bin/sh
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+echo "==== RESCUE MODE ===="
+echo "Montage du disque racine pour reparation..."
+
+# Exemple : activer LVM si nécessaire
+vgchange -ay
+
+# Laisser une shell ouverte
+exec /bin/sh
+EOF
+chmod +x init
+
+C’est un init minimal comme dans un initramfs.
+
+
+---
+
+🔧 ÉTAPE 3 — Créer un initramfs à partir de ce rootfs
+
+cd /root/rescue_rootfs
+find . | cpio -o -H newc | gzip > /boot/rootfs-rescue.img
+
+Tu as maintenant :
+
+/boot/rootfs-rescue.img
+
+
+---
+
+🔧 ÉTAPE 4 — Ajouter un menu GRUB “Rescue Mode”
+
+Éditer /etc/grub.d/40_custom :
+
+menuentry "Rescue Local RootFS" {
+    insmod gzio
+    insmod part_gpt
+    insmod ext2
+
+    linux /boot/vmlinuz-<VERSION> rescue=1 rd.break
+    initrd /boot/rootfs-rescue.img
+}
+
+Remplacer <VERSION> par :
+
+uname -r
+
+Regénérer GRUB :
+
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+
+---
+
+🚀 RÉSULTAT MÉTHODE 3
+
+Au prochain reboot, tu sélectionnes :
+
+Rescue Local RootFS
+
+Tu arrives dans un shell BusyBox minimal, totalement indépendant du système cassé.
+
+Tu peux alors :
+
+monter /dev/vda ou LVM
+
+chrooter dans le système cassé
+
+réparer GRUB
+
+réparer dracut
+
+reconstruire initramfs
+
+récupérer les logs
+
+manipuler un FS cassé
+
+xfs_repair ou fsck vers root
+
+
+
+---
+
+🟦 MÉTHODE 4 — Boot Rescue via initramfs personnalisé (super puissant)
+
+(Utiliser dracut pour fabriquer un initramfs contenant un OS rescue complet)
+
+
+---
+
+🎯 Objectif
+
+Construire un initramfs personnalisé qui contient :
+
+BusyBox
+
+les outils de réparation (xfs_repair, fsck, lvm, cryptsetup…)
+
+un shell interactif
+
+un mode “rescue” avant montage root
+
+
+Tu remplaces uniquement l’initramfs dans GRUB, sans toucher le système.
+
+C’est encore plus robuste que la méthode 3, car tu n’as pas besoin de créer un rootfs complet.
+
+
+---
+
+🔧 ÉTAPE 1 — Installer busybox pour l’initramfs
+
+dnf install busybox dracut-network -y
+
+
+---
+
+🔧 ÉTAPE 2 — Générer un initramfs rescue
+
+Avec dracut :
+
+dracut --force \
+       --add-rescue \
+       --add "busybox" \
+       --omit plymouth \
+       /boot/initramfs-rescue.img \
+       $(uname -r)
+
+Explications :
+
+Option	Rôle
+
+--add-rescue	Ajoute le module rescue intégré de dracut
+--add busybox	Ajoute toutes les commandes busybox dans initramfs
+--omit plymouth	Retire les animations et accélère le boot
+Chemin initramfs	On crée un initramfs parallèle uniquement pour rescue
+
+
+
+---
+
+🔧 ÉTAPE 3 — Ajouter entrée GRUB pour initramfs Rescue
+
+Dans /etc/grub.d/40_custom :
+
+menuentry "DRACUT RESCUE MODE" {
+    linux /boot/vmlinuz-$(uname -r) rd.break rd.shell
+    initrd /boot/initramfs-rescue.img
+}
+
+Regénérer :
+
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+
+---
+
+🚀 RÉSULTAT MÉTHODE 4
+
+Au boot, sélectionner :
+
+DRACUT RESCUE MODE
+
+Tu tombes dans :
+
+dracut:/#
+
+Avec :
+
+tous les modules LVM
+
+tous les drivers nécessaires
+
+BusyBox (sh, awk, sed, mount…)
+
+outils réseau (si dracut-network présent)
+
+outils de réparation FS
+
+
+Fonctionnalités disponibles :
+
+✔ Activer LVM :
+
+lvm vgchange -ay
+
+✔ Monter root :
+
+mount /dev/mapper/rootvg-rootlv /mnt
+
+✔ Reparer initramfs cassé :
+
+chroot /mnt
+dracut --force
+
+✔ Réinstaller GRUB :
+
+grub2-install /dev/vda
+grub2-mkconfig -o /boot/grub2/grub.cfg
+
+✔ Diagnostiquer un kernel panic
+
+Tu as accès :
+
+au journal du boot
+
+au kernel command line
+
+aux modules du kernel
+
+au chargement des drivers
+
+
+🔋 AVANTAGE
+
+➡️ Tu n’as besoin que de GRUB fonctionnel.
+➡️ C’est le vrai “rescue boot” local idéal pour IBM Cloud VSI.
+
+
+---
+
+📌 MÉTHODE 3 vs MÉTHODE 4
+
+Critère	Méthode 3 (rootfs local)	Méthode 4 (initramfs rescue)
+
+Difficulté	⭐⭐⭐⭐	⭐⭐⭐
+Dépendance GRUB	Oui	Oui
+Taille	10–40 MB	8–15 MB
+Shell	BusyBox	BusyBox + Dracut
+Capacités FS	Très bon	Excellent
+Capacités LVM	Avec modules	Intégrées
+Boot rapide	Moyen	Très rapide
+Compatibilité IBM VSI	100%	100%
+
+
+➡️ Méthode 4 est la plus propre et la plus puissante.
+➡️ Méthode 3 est la plus flexible (OS minimal complet).
+
+
+---
+
+🎯 Résumé ultra-court
+
+MÉTHODE 3 → Créer un rootfs minimal + GRUB entry
+
+➡️ Résultat : un mini-OS rescue bootable à partir de /boot.
+
+MÉTHODE 4 → Créer un initramfs rescue complet
+
+➡️ Résultat : un dracut shell avancé, parfait pour réparer kernel panic / initramfs / grub.
+
+
+---
+
+🧩 Tu veux maintenant :
+
+✔ Une procedure pour IBM Cloud VSI complète avec schémas ?
+✔ Un script automation pour créer le initramfs-rescue en 1 commande ?
+✔ Une procédure N4 pour réparer kernel panic / dracut prompt via méthode 4 ?
